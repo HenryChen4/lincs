@@ -1,0 +1,3 @@
+[submodule "osnet"]
+	path = osnet
+	url = https://github.com/HenryChen4/osnet.git
