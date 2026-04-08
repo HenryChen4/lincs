@@ -8,6 +8,9 @@ import torch.nn.functional as F
 from osnet.torchreid.data.datasets.video.mars import Mars # made some adjustments
 from osnet.torchreid.data.transforms import RandomErasing, Random2DTranslation, RandomHorizontalFlip, RandomPatch, build_transforms
 from osnet.torchreid.utils.feature_extractor import FeatureExtractor
+
+from osnet.torchreid.models.osnet import OSNet, OSBlock, init_local_ckpt, prep_img_paths
+
 from osnet.torchreid.utils.reidtools import visualize_ranked_results
 
 from tqdm import tqdm
@@ -25,13 +28,20 @@ EXPERIMENTS = {
     "osnet_msmt": {
         "result_subdir_ext": "msmt",
         "ckpt_path": "./pretrained_ckpt/osnet_x1_0_msmt17_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip.pth"
+    },
+    "osnet_combine": {
+        "result_subdir_ext": "combine",
+        "ckpt_path": "./pretrained_ckpt/osnet_x1_0_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth"
     }
 }
 
 def extract_tracklet_feat(img_paths, 
                           feat_extractor):
-    frame_feats = feat_extractor(list(img_paths))
+    img_tensors = prep_img_paths(list(img_paths))
+    frame_feats = feat_extractor(img_tensors)
+    del img_tensors
     tracklet_feat = frame_feats.mean(dim=0)
+
     return tracklet_feat
 
 def extract_all_feat(data, 
@@ -42,14 +52,18 @@ def extract_all_feat(data,
         "tracklet_ids": [],
         "cam_ids": []
     }
-    
-    for img_paths, tracklet_id, cam_id, _ in tqdm(data):
-        feat = extract_tracklet_feat(img_paths=img_paths,
-                                     feat_extractor=feat_extractor)
 
-        all_tracklet_feat["features"].append(feat)
-        all_tracklet_feat["tracklet_ids"].append(tracklet_id)
-        all_tracklet_feat["cam_ids"].append(cam_id)
+    with torch.no_grad():
+        for img_paths, tracklet_id, cam_id, _ in tqdm(data):
+            feat = extract_tracklet_feat(img_paths=img_paths,
+                                         feat_extractor=feat_extractor)
+            feat = feat.detach().cpu()
+
+            all_tracklet_feat["features"].append(feat)
+            all_tracklet_feat["tracklet_ids"].append(tracklet_id)
+            all_tracklet_feat["cam_ids"].append(cam_id)
+
+            del feat
 
     with open(os.path.join(save_dir, "all_tracklet_feat.pkl"), "wb") as f:
         pkl.dump(all_tracklet_feat, f)
@@ -146,11 +160,19 @@ def main(results_dir=None,
 
         print(f"SAVING RESULTS TO: {query_save_dir} and {gallery_save_dir}")
 
-        osnet_x1_0_feat_extractor = FeatureExtractor(
-            model_name="osnet_x1_0",
-            model_path=EXPERIMENTS[experiment_name]["ckpt_path"],
-            device="cuda"
-        )
+        osnet_x1_0_feat_extractor = OSNet(
+            1000,
+            blocks=[OSBlock, OSBlock, OSBlock],
+            layers=[2, 2, 2],
+            channels=[64, 256, 384, 512],
+            loss='softmax'
+        ).to(torch.device("cuda"))
+
+        print("Model size: {:.5f}M".format(sum(p.numel() for p in osnet_x1_0_feat_extractor.parameters()) / 1000000.0))
+
+        initialized_model = init_local_ckpt(model=osnet_x1_0_feat_extractor,
+                                            ckpt_path=EXPERIMENTS[experiment_name]["ckpt_path"])
+        initialized_model.eval()
         
         mars_dataset = Mars(root="../../../../data6/haidong/data/mars/",
                             transform=transform_te)
@@ -159,11 +181,11 @@ def main(results_dir=None,
         mars_gallery = mars_dataset.gallery
 
         print("BEGIN EXTRACTING QUERY")
-        _ = extract_all_feat(mars_query, osnet_x1_0_feat_extractor, query_save_dir)
+        _ = extract_all_feat(mars_query, initialized_model, query_save_dir)
         print("FINISHED EXTRACTING QUERY")
 
         print("BEGIN EXTRACTING GALLERY")
-        _ = extract_all_feat(mars_gallery, osnet_x1_0_feat_extractor, gallery_save_dir)
+        _ = extract_all_feat(mars_gallery, initialized_model, gallery_save_dir)
         print("FINISHED EXTRACTING GALLERY")
 
         results_dir = results_subdir
@@ -214,8 +236,10 @@ if __name__ == "__main__":
 # CUDA_VISIBLE_DEVICES=1 python -m src.eval_mars --experiment_name="osnet_market" (~30 mins)
 # CUDA_VISIBLE_DEVICES=2 python -m src.eval_mars --experiment_name="osnet_duke"
 # CUDA_VISIBLE_DEVICES=3 python -m src.eval_mars --experiment_name="osnet_msmt"
+# CUDA_VISIBLE_DEVICES=1 python -m src.eval_mars --experiment_name="osnet_combine" (~30 mins)
 
 # evaluating (features exist!) cmds
 # python -m src.eval_mars --results_dir="./results/2026_04_06_04_14_26_market"
 # python -m src.eval_mars --results_dir="./results/2026_04_06_04_19_47_duke"
-# python -m src.eval_mars --results_dir="./results/2026_04_06_04_20_21_msmt"
+# python -m src.eval_mars --results_dir="./results/2026_04_07_22_58_46_market"
+# 
